@@ -1,10 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 
@@ -24,11 +28,34 @@ func main() {
 	// Initialize structured logger
 	utils.InitLogger()
 
-	// Connect to database
-	db, err := config.ConnectDB()
-	if err != nil {
-		log.Fatalf("Database connection failed: %v", err)
+	// Retry database connection
+	var db *sql.DB
+	var err error
+	dsn := os.Getenv("DSN")
+	if dsn == "" {
+		dsn = "root:@tcp(db:3306)/jobqueue"
 	}
+
+	for i := 0; i < 10; i++ {
+		db, err = config.ConnectDB()
+		if err == nil {
+			err = db.Ping()
+			if err == nil {
+				log.Println("Successfully connected to the database.")
+				break
+			}
+			log.Printf("Attempt %d: Ping failed: %v", i+1, err)
+		} else {
+			log.Printf("Attempt %d: Failed to open DB: %v", i+1, err)
+		}
+		log.Println(" Waiting for DB to be ready...")
+		time.Sleep(2 * time.Second)
+	}
+
+	if err != nil {
+		log.Fatalf("Database connection failed after multiple attempts: %v", err)
+	}
+	defer db.Close()
 
 	// Initialize repository and job handler
 	jobRepo := &repository.JobRepo{DB: db}
@@ -40,6 +67,10 @@ func main() {
 	// Start worker pool with 5 workers
 	jobWorker := &worker.JobExecutor{Repo: jobRepo}
 	jobWorker.StartWorkerPool(5)
+
+	router := gin.Default()
+	// Enable CORS from all origins
+	router.Use(cors.Default())
 
 	// Setup API routes
 	r := mux.NewRouter()
